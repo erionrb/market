@@ -101,4 +101,32 @@ contract LiquidationPricingTest is Test {
 
         assertEq(currentSeize, expectedSeize);
     }
+
+    // Fuzz: whatever the liquidator repays, the collateral they walk away with
+    // must not be worth more than their repayment plus the incentive. The bug
+    // (dividing by FACTOR instead of the price) breaks this for any price != 1e18.
+    function testFuzz_seizedValueNeverExceedsRepayPlusIncentive(uint256 repayAmount) public {
+        weth.mint(borrower, 100e18);
+        vm.startPrank(borrower);
+        weth.approve(address(market), type(uint256).max);
+        market.supplyCollateral(100e18);
+        market.borrow(150_000e18);
+        vm.stopPrank();
+
+        wethOracle.setPrice(1_800e18);
+        assertFalse(market.isHealthy(borrower));
+
+        repayAmount = bound(repayAmount, 1e18, 150_000e18);
+        base.mint(liquidator, repayAmount);
+
+        vm.startPrank(liquidator);
+        base.approve(address(market), type(uint256).max);
+        market.liquidate(borrower, repayAmount);
+        vm.stopPrank();
+
+        uint256 seizedValue = (weth.balanceOf(liquidator) * market.getPrice()) / FACTOR;
+        uint256 maxValue = (repayAmount * market.liquidationIncentive()) / FACTOR;
+
+        assertLe(seizedValue, maxValue, "seized collateral worth more than repay + incentive");
+    }
 }

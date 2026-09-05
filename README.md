@@ -78,12 +78,33 @@ against the base asset.
 
 ## Dev notes
 
+## Findings
+
+### High — Incorrect accounting for fee-on-transfer tokens
+
+Incoming token transfers were accounted using the requested amount instead of the
+amount actually received by the market. With fee-on-transfer assets this could
+overstate collateral, supply or repayment balances and break the market accounting,
+potentially leaving the protocol with liabilities that are not fully backed by tokens.
+
+The affected pull paths now account using the actual balance delta received by the market.
+
+### High — Incorrect collateral amount seized during liquidation
+
+`liquidate()` calculated the seized collateral directly from the repaid base amount
+and liquidation incentive, without converting that value using the collateral price.
+This could cause a liquidator to seize more collateral than the repayment economically
+entitles them to, directly causing losses to borrowers during liquidation.
+
+The liquidation calculation now converts the repaid base value into collateral units
+using the oracle price before applying the collateral balance cap.
+
+### Reserve-factor
+
 Verification procedure ran before and after the storage changes:
 ```bash
 forge inspect src/LendingMarket.sol:LendingMarket storage-layout
 ```
-
-### Reserve-factor change
 
 `reserveFactor` (slot 18) and `totalReserves` (slot 19) were appended after `_initialized`.
 

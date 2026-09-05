@@ -1,142 +1,151 @@
-# Static Analysis Triage — Aderyn + Slither (pre-fix baseline)
+# Static Analysis Triage — Aderyn + Slither (`after` run)
 
-**Scope:** `src/LendingMarket.sol` (218 nSLOC), `src/TransparentUpgradeableProxy.sol` (57 nSLOC), `src/interfaces/*`.
-**Inputs:** `docs/security/aderyn/before/` (3 High + 5 Low categories, 26 instances), `docs/security/slither/before/` (12 detectors, 38 results ID-0..ID-37).
+**Scope:** `src/LendingMarket.sol` (254 nSLOC), `src/TransparentUpgradeableProxy.sol` (57 nSLOC), `src/interfaces/*`.
+**Inputs:** `docs/security/aderyn/after/` (3 High + 5 Low categories), `docs/security/slither/after/` (`full.md` = 12 detectors, ID-0..ID-42).
 
-**Triage method / limits:**
-- Every entry below is a **hypothesis emitted by a tool**, not a confirmed vulnerability. Nothing here is classified as exploitable.
-- Correlation was done **report-to-report only** (cross-tool corroboration + line-number matching). Source was not opened, per the read allow-list, so "verified" here means "the two tools agree on the same construct at the same line", never "confirmed in code".
-- No fixes proposed. False positives and duplicates are kept visible on purpose.
+**Method / limits:**
+- Every row is a **tool hypothesis**, not a confirmed issue. Nothing here is classified as exploitable.
+- Correlation is line-number + construct matching between the two reports, cross-checked against `src/` for context only. "Both tools agree" ≠ "confirmed in code".
+- No fixes proposed. Duplicates and likely false positives are kept visible on purpose.
 
-**Coverage gap (blocking for the upgradeable design):** `slither/before/upgradeability.md` is **0 bytes** — `slither-check-upgradeability . LendingMarket --proxy-name TransparentUpgradeableProxy` produced no output. Storage-layout collision, initializer, and proxy-variable checks are therefore **unrun**, not clean. Re-run before trusting the proxy surface.
+**Coverage gap:** `slither/after/upgradeability.md` is **0 bytes** — `slither-check-upgradeability` produced no output. Storage-layout collision / initializer / proxy-variable checks are **unrun, not clean**. The storage comment in `LendingMarket.sol` ("reserves appended; zero-initialised on the live proxy") makes this the single most important thing to re-run.
 
 ---
 
 ## 1. Findings reported by BOTH tools
 
-### B-1. Unchecked ERC20 return value (8 call sites)
-- **Where:** `LendingMarket` — `supply` L160, `withdraw` L179, `supplyCollateral` L191, `withdrawCollateral` L208, `borrow` L223, `repay` L237, `liquidate` L276 + L277.
-- **Slither:** `unchecked-transfer` (High / Medium conf), ID-0..ID-7.
-- **Aderyn:** `L-3 Unchecked Return` (8) **and** `L-4 Unsafe ERC20 Operation` (8) — *same 8 lines reported twice by Aderyn under two detector names → internal duplicate, count once.*
-- **Agreement:** exact, 8/8 line match. Highest-confidence corroboration in the run.
-- **Manual investigation: YES — first priority.** Tools only see the missing return check; they cannot tell whether the configured `baseToken`/`collateralToken` are non-standard (no-return, fee-on-transfer, rebasing). Impact depends entirely on token choice + on whether accounting is done on the *requested* amount vs the *received* amount. Both are code/config questions, not detector questions.
+### B-1. Unchecked ERC20 return value — 9 call sites
+- **Where:** `LendingMarket`: `supply` L171, `withdraw` L193, `supplyCollateral` L206, `withdrawCollateral` L226, `borrow` L241, `repay` L254, `liquidate` L287 + L304, `withdrawReserves` L410.
+- **Slither:** `unchecked-transfer` (High / Medium conf), ID-0..ID-8.
+- **Aderyn:** `L-3 Unchecked Return` (9) **and** `L-4 Unsafe ERC20 Operation` (9) — same 9 lines under two detector names → **intra-tool duplicate, count once**. Aderyn rates Low; Slither rates High.
+- **Agreement:** exact, 9/9.
+- **Manual: YES — top priority.** `IERC20` here declares `transfer`/`transferFrom` as returning `bool`, and the contract does a `balanceBefore`/`balanceOf` delta check after each pull (`supply`, `supplyCollateral`, `repay`, `liquidate`) — so a silent-fail token would revert on the `transferedAmount > 0` require in *those* paths, but `withdraw` L193, `borrow` L241, `withdrawCollateral` L226, `liquidate` L304 (collateral out), `withdrawReserves` L410 have **no post-transfer check**. Auditor needs to confirm the deployed `baseToken`/`collateralToken` behaviour (no-return / fee-on-transfer / rebasing) and whether the delta pattern is applied consistently.
 
-### B-2. State written after external call (CEI violation) — 3 call sites
-- **Where:** `supply` L160 → `supplyPrincipal[msg.sender] += principal` (L163), `totalSupplyPrincipal += principal` (L164); `supplyCollateral` L191 → `collateralBalance[msg.sender] += amount` (L193), `totalCollateral += amount` (L194); `repay` L237 → `borrowPrincipal[msg.sender] -= principal` (L239), `totalBorrowPrincipal -= principal` (L240).
-- **Aderyn:** `H-2 Reentrancy: State change after external call` — all 3 rated **High**, undifferentiated.
-- **Slither:** splits by severity — `reentrancy-no-eth` (Medium) ID-12 `repay`, ID-13 `supply` **with named cross-function reachability** (`borrowPrincipal`/`totalBorrowPrincipal` reachable from `borrow`, `liquidate`, `borrowBalanceOf`; `totalSupplyPrincipal` reachable from `accrueInterest`, `withdraw`, `utilization`); `reentrancy-benign` (Low) ID-19 `supply`, ID-20 `supplyCollateral`.
-- **Note:** Slither's `reentrancy-real.md` is a **duplicate** of `full.md` ID-12/ID-13 (same two results, re-run with `--detect`). Not new findings.
-- **Manual investigation: YES.** Reachability is real only if the token can hand control to the caller (ERC777/ERC1363/hooked or malicious token) — same dependency as B-1. Aderyn's blanket "High" is severity inflation; Slither's cross-function list is the useful artifact. Key question for the auditor: is there a reentrancy guard / is `accrueInterest` called before the external call, and can a mid-call read of `totalSupplyPrincipal`/`totalBorrowPrincipal` (used by `utilization` → interest rate) be observed by a reentrant path.
+### B-2. State written after external call (CEI) — 3 pull sites + 1 in `withdrawReserves`
+- **Where:**
+  - `supply` L171 → `supplyPrincipal[msg.sender] += principal` (L177), `totalSupplyPrincipal += principal` (L178)
+  - `supplyCollateral` L206 → `collateralBalance[...] += transferedAmount` (L211), `totalCollateral += ...` (L212)
+  - `repay` L254 → `borrowPrincipal[msg.sender] -= principal` (L261), `totalBorrowPrincipal -= principal` (L262)
+  - `liquidate` L287 → `borrowPrincipal[borrower] -= principal` (L298), `totalBorrowPrincipal` (L299), `collateralBalance[borrower] -= seizeAmount` (L301), `totalCollateral` (L302)
+  - `withdrawReserves` L408: Aderyn also flags `totalReserves -= amount` after `baseToken.balanceOf(...)` — that "external call" is a `balanceOf` view, so this instance is **noise**.
+- **Aderyn:** `H-2 Reentrancy: State change after external call` — 13 raw instances, all **High**, undifferentiated (it lists the `balanceBefore` read, the transfer, and the delta read as 3 separate hits per function).
+- **Slither:** graded —
+  - `reentrancy-no-eth` (Medium) ID-14 `repay`, ID-15 `supply`, ID-16 `liquidate`, **with named cross-function reachability**: `borrowPrincipal`/`totalBorrowPrincipal` reachable from `borrow`, `liquidate`, `borrowBalanceOf`, `repay`; `totalSupplyPrincipal` reachable from `accrueInterest`, `withdraw`, `utilization`; `collateralBalance` reachable from `isHealthy`, `withdrawCollateral`.
+  - `reentrancy-benign` (Low) ID-22 `liquidate` (`totalCollateral`), ID-23 `supplyCollateral`, ID-24 `supply`.
+- **Duplicate:** `slither/after/reentrancy-real.md` = a re-run of ID-14/15/16 only. Not new.
+- **Manual: YES.** Exploitability hinges on whether `baseToken`/`collateralToken` can hand control to the caller (ERC777/1363/hooked/malicious) — same token question as B-1. If they can, the useful artifact is Slither's cross-function list: a reentrant read of `totalSupplyPrincipal`/`totalBorrowPrincipal` mid-`supply`/`repay` feeds `utilization()` → interest rate, and mid-`liquidate` the borrower's `collateralBalance`/`borrowPrincipal` are transiently inconsistent vs `isHealthy`. Check for a reentrancy guard (there is none) and whether `accrueInterest()` running before the pull matters. Aderyn's blanket High is severity inflation.
 
-### B-3. Missing zero-address check on privileged/config addresses (partial overlap)
-- **Overlapping:** `initialize` L113 `admin = admin_`, L114 `pauseGuardian = pauseGuardian_` — Aderyn `L-2`, Slither `missing-zero-check` ID-16/ID-17.
-- **Aderyn-only extras:** L115 `oracle`, L116 `baseToken`, L117 `collateralToken`.
-- **Slither-only extra:** `TransparentUpgradeableProxy.constructor` L21/L26 `implementation_` used in `delegatecall` without zero-check (ID-18).
-- **Manual investigation: LOW value as stated, but the surrounding function matters.** The zero-check itself is hygiene. What deserves review is `initialize` — whether it is access-controlled / one-shot (re-initialization or unprotected-initializer front-running on a proxy is a real class the detectors did **not** test here, since the upgradeability run is empty).
+### B-3. Missing zero-address check (partial overlap)
+- **Overlap:** `initialize` L119 `admin = admin_`, L120 `pauseGuardian = pauseGuardian_` — Aderyn `L-2`, Slither `missing-zero-check` ID-19/ID-21.
+- **Aderyn-only:** `initialize` L121 `oracle`, L122 `baseToken`, L123 `collateralToken`.
+- **Slither-only:** `TransparentUpgradeableProxy.constructor` `implementation_` used in `delegatecall` without zero-check — ID-20.
+- **Manual: LOW for the check itself.** The higher-value adjacent question: `initialize` is guarded only by `_initialized` bool and is `external` with no access control → **unprotected initializer behind a proxy** (front-run / implementation-contract init). Neither tool tested this (upgradeability run empty). Worth review.
 
-### B-4. `setAdmin` changes privileged state without an event
-- **Where:** `LendingMarket.setAdmin(address)` L371-L374, `admin = newAdmin` L373.
-- **Aderyn:** `L-1 State Change Without Event`. **Slither:** `events-access` ID-15 — *Slither lists `admin = newAdmin` twice inside one result → cosmetic duplicate in output.*
-- **Aderyn-only extras in the same detector:** `initialize` L100, `accrueInterest` L133 (see A-3).
-- **Manual investigation: NO for the event itself** (monitoring/informational). **YES for the adjacent question:** single-step admin transfer to an arbitrary address on a contract that also fronts an upgradeable proxy — review the privilege model, not the missing event.
+### B-4. `setAdmin` mutates privileged state without an event
+- **Where:** `LendingMarket.setAdmin(address)` L419-L422, `admin = newAdmin` L421.
+- **Aderyn:** `L-1 State Change Without Event`. **Slither:** `events-access` ID-18 (lists `admin = newAdmin` twice → cosmetic dup).
+- **Aderyn-only extras in `L-1`:** `initialize` L106, `accrueInterest` L139.
+- **Manual: NO for the missing event** (monitoring only). **YES for the privilege model:** single-step admin transfer to an arbitrary non-zero address on the contract that also fronts an upgradeable proxy — review who holds `admin` vs proxy-admin, and single- vs two-step transfer.
 
-### B-5. Inline assembly in the proxy fallback (same location, different framing)
+### B-5. Inline assembly in proxy fallback (same location, different severity)
 - **Where:** `TransparentUpgradeableProxy.fallback()` L50-L60; Aderyn anchors L58 `default { return(0, returndatasize()) }`.
-- **Aderyn:** `H-3 Yul block contains return` — **High**. **Slither:** `assembly` ID-34 — **Informational**.
-- **Verdict: Aderyn H-3 is a false positive in this context.** `return(0, returndatasize())` is the required terminator of a standard delegatecall proxy fallback; the detector's rationale ("nothing after the assembly block executes") is the intended behaviour. Slither's severity is the correct one.
-- **Manual investigation: YES, but not for this reason.** Review the fallback for the usual proxy concerns instead: returndata copy correctness, admin/selector clash between proxy and `LendingMarket`, and slot handling — none of which either tool asserted.
+- **Aderyn:** `H-3 Yul block contains return` — **High**. **Slither:** `assembly` ID-39 — **Informational**.
+- **Verdict:** Aderyn `H-3` is a **false positive here** — `return(0, returndatasize())` is the mandatory terminator of a standard delegatecall proxy fallback; the "code after the block won't run" rationale is the intended design. Slither's severity is correct.
+- **Manual: YES, for other reasons:** returndata handling, proxy/implementation selector clash, admin routing (this proxy does **not** branch on `msg.sender == admin` in the fallback — every caller including proxy-admin is delegated; `upgradeTo` is a normal function on the proxy, so a selector collision with `LendingMarket` would be reachable). None of that is asserted by either tool.
 
 ---
 
 ## 2. Findings reported ONLY by Slither
 
-### S-1. `divide-before-multiply` (Medium, 2 results) — precision loss
-- `accrueInterest()` L145-L146: `accruedToSuppliers = (borrowsBefore * interest) / FACTOR` then `baseSupplyIndex += (baseSupplyIndex * accruedToSuppliers) / suppliesBefore`.
-- `isHealthy(address)` L316-L317: `collateralValue = (collateralBalance * getPrice()) / FACTOR` then `borrowingPower = (collateralValue * collateralFactor) / FACTOR`.
-- **Manual investigation: YES — highest-signal Slither-only item.** Detector cannot judge magnitude. Both sites are economically load-bearing: rounding in the supply index drives interest distribution; rounding in `borrowingPower` sits directly on the liquidation boundary. Needs a rounding-direction review (does truncation favour the protocol or the borrower?) rather than a "divide before multiply" label.
+### S-1. `divide-before-multiply` (Medium, 2) — precision loss
+- `accrueInterest()` L150-151: `borrowerInterest = (borrowsBefore * interest) / FACTOR` → `reserveAccrued = (borrowerInterest * reserveFactor) / FACTOR`.
+- `isHealthy()` L348-349: `collateralValue = (collateralBalance * getPrice()) / FACTOR` → `borrowingPower = (collateralValue * collateralFactor) / FACTOR`.
+- **Manual: YES — highest-signal Slither-only item.** Detector can't judge magnitude. Both sites are economically load-bearing: `reserveAccrued`/`supplierInterest` split drives interest distribution; `borrowingPower` sits on the liquidation boundary. Needs rounding-direction review (does truncation favour protocol or user?), plus the related un-flagged line `baseSupplyIndex += (baseSupplyIndex * supplierInterest) / suppliesBefore` (L156).
 
-### S-2. `unused-return` on the oracle (Medium, 1 result)
-- `getPrice()` L323-L326: `(None, answer, None, None, None) = oracle.latestRoundData()` — `roundId`, `updatedAt`, `answeredInRound` discarded.
-- **Manual investigation: YES — treat as the top oracle question.** The tool only reports discarded tuple members; the audit question is staleness/round-completeness validation and whether `answer <= 0` is handled. Directly feeds `isHealthy` → liquidation. Aderyn missed this entirely.
+### S-2. `unused-return` on the oracle (Medium, 1) — ID-17
+- `getPrice()` L356: `(, int256 answer,,,) = oracle.latestRoundData()` — `roundId`, `updatedAt`, `answeredInRound` discarded; `answer` cast `uint256(answer)` with no `> 0` check.
+- **Manual: YES — top oracle question.** Staleness / round-completeness / non-positive price all unhandled. Feeds `isHealthy` and `liquidate` (`seizeAmount = transferedAmount * liquidationIncentive / getPrice()`). Aderyn missed this entirely.
 
-### S-3. `incorrect-equality` (Medium, High conf, 2 results)
-- `accrueInterest()` L135 `elapsed == 0`; `isHealthy()` L314 `debt == 0`.
-- **Manual investigation: LOW / likely false positive.** Both look like ordinary early-return guards, not balance-equality checks. Worth one glance at `elapsed == 0` only to confirm the accrual short-circuit cannot be abused to skip accrual within a block.
+### S-3. `incorrect-equality` (Medium, High conf, 3) — ID-11/12/13
+- `utilization()` L339 `supplied == 0`; `accrueInterest()` L141 `elapsed == 0`; `isHealthy()` L346 `debt == 0`.
+- **Manual: LOW / likely false positive.** All three are ordinary early-return guards, not token-balance equality. One glance at `elapsed == 0` to confirm same-block accrual skip isn't abusable; otherwise dismiss.
 
-### S-4. `reentrancy-events` (Low, 7 results: ID-21..ID-27)
-- `borrow` L223/L225, `supplyCollateral` L191/L196, `withdraw` L179/L181, `withdrawCollateral` L208/L210, `repay` L237/L242, `supply` L160/L166, `liquidate` L276-277/L279.
-- `slither/before/reentrancy-events.md` is a **duplicate re-run** of these same 7 results.
-- **Manual investigation: NO as an independent issue.** Event-ordering only; it is the same CEI shape already captured in B-2. Keep as supporting evidence for B-2, do not triage separately.
+### S-4. `reentrancy-events` (Low, 8) — ID-25..ID-32
+- `supplyCollateral`, `supply`, `withdrawCollateral`, `liquidate`, `withdrawReserves`, `repay`, `borrow`, `withdraw` — event emitted after external call.
+- **Manual: NO as an independent issue.** Same CEI shape as B-2; keep as supporting evidence, don't triage separately.
 
-### S-5. `timestamp` (Low, 5 results: ID-28..ID-32)
-- `accrueInterest` L135, `repay` L229/L233, `liquidate` L256/L262/L265, `isHealthy` L314/L319, `withdrawCollateral` L201.
-- **Mostly false positives:** ID-29/ID-30/ID-31/ID-32 flag plain `require` and amount comparisons (`amount > owed`, `borrowingPower >= debt`, `collateralBalance >= amount`) that have nothing to do with `block.timestamp` — taint-propagation noise.
-- **Manual investigation: only ID-28** (`accrueInterest` `elapsed == 0`), and only to confirm timestamp-driven accrual has no same-block manipulation angle. Ignore the rest.
+### S-5. `timestamp` (Low, 5) — ID-33..ID-37
+- `liquidate` L278/L284, `isHealthy` L346/L351, `repay` L247/L251, `accrueInterest` L141/L152, `withdrawReserves` L407.
+- **Mostly false positives:** ID-33/34/35/37 flag plain `require`/amount comparisons (`repayAmount > owed`, `borrowingPower >= debt`, `amount <= totalReserves`) with no `block.timestamp` involvement — taint-propagation noise.
+- **Manual: only ID-36** (`accrueInterest` `elapsed == 0` / `reserveAccrued != 0`), and only to confirm no same-block manipulation angle. Ignore the rest.
 
-### S-6. `assembly` (Informational, 4 results) + `low-level-calls` (Informational, 1)
-- `TransparentUpgradeableProxy._getSlot` L64-68, `_setSlot` L70-74, `_revertReason` L76-82, `fallback` L50-60; `delegatecall(initData)` in the constructor L26 (ID-37).
-- **Manual investigation: YES for the proxy as a unit, not per-detector.** These are expected constructs; the review target is the hand-rolled proxy overall (EIP-1967 slot constants, admin routing, constructor-time delegatecall to an unvalidated `implementation_`) — especially since `slither-check-upgradeability` produced nothing.
+### S-6. `assembly` (Info, 4) ID-38..41 + `low-level-calls` (Info, 1) ID-42
+- Proxy `_revertReason` L76-82, `fallback` L50-60, `_setSlot` L70-74, `_getSlot` L64-68; constructor `implementation_.delegatecall(initData)` L26.
+- **Manual: YES for the proxy as a unit** (see B-5, B-3) — EIP-1967 slot constants, missing admin branch in fallback, constructor-time `delegatecall` to unvalidated `implementation_`. Expected constructs individually; the hand-rolled proxy needs a dedicated pass, especially with `upgradeability.md` empty.
 
 ---
 
 ## 3. Findings reported ONLY by Aderyn
 
 ### A-1. `H-1 Contract locks Ether without a withdraw function` — `TransparentUpgradeableProxy` L11
-- **Manual investigation: LOW — likely false positive.** A proxy's `payable` fallback forwards value via `delegatecall` to the implementation; "no withdraw function" is expected. Only relevant if `LendingMarket` has no path that can move ETH, and only if the market is meant to receive ETH at all. Confirm-and-dismiss item.
+- Triggered by `receive() external payable {}` + `payable` fallback with no withdraw.
+- **Manual: LOW — likely false positive.** A proxy's `payable` fallback forwards value via `delegatecall`; `LendingMarket` has no `payable` function and no ETH-moving path, so ETH sent directly to `receive()` would be stuck — but that is a "don't send ETH here" issue, not a protocol vuln. Confirm-and-dismiss.
 
-### A-2. `H-3 Yul block contains return` — see **B-5**. Same location as Slither's `assembly` ID-34, rated High vs Informational. **Recorded as a false positive.**
+### A-2. `H-3 Yul block contains return` — see **B-5**. Same line as Slither `assembly` ID-39, High vs Info. **Recorded as false positive.**
 
-### A-3. `L-1 State Change Without Event` extras — `initialize` L100, `accrueInterest` L133
-- **Manual investigation: NO for `accrueInterest`** (per-block accrual events are usually deliberately omitted). **Marginal for `initialize`** — observability only; the real `initialize` question is protection, see B-3.
+### A-3. `L-1 State Change Without Event` extras — `initialize` L106, `accrueInterest` L139
+- **Manual: NO for `accrueInterest`** (per-call accrual events normally omitted). **Marginal for `initialize`** — observability only; real question is initializer protection (B-3).
 
-### A-4. `L-2 missing zero-check` extras — `oracle` L115, `baseToken` L116, `collateralToken` L117
-- **Manual investigation: NO as a zero-check.** Subsumed by the broader "are these immutable / can they be re-pointed after init" question.
+### A-4. `L-2 missing zero-check` extras — `oracle` L121, `baseToken` L122, `collateralToken` L123
+- **Manual: NO as a zero-check.** Fold into "are these fixed at init or re-pointable" — note `setOracle` (L376) already allows guardian to change `oracle` with a zero-check, but `baseToken`/`collateralToken` have no setter (good).
 
-### A-5. `L-5 Public Function Not Used Internally` — `supplyBalanceOf` L290, `utilization` L305
-- **Manual investigation: NO.** Gas/style only, zero security content. Note `utilization()` reads `totalSupplyPrincipal`/`totalBorrowPrincipal`, the same vars in B-2 — relevant as a *read path* there, not as a visibility issue.
+### A-5. `L-5 Public Function Not Used Internally` — `supplyBalanceOf` L317, `utilization` L337
+- **Manual: NO.** Gas/style only. `utilization()` reads `totalSupplyPrincipal`/`totalBorrowPrincipal` — relevant only as a read path for B-2, not as a visibility issue.
 
 ---
 
-## 4. Duplicates & false-positive register (keep visible)
+## 4. Duplicates & likely-false-positive register (keep visible)
 
 | # | Item | Classification |
 |---|---|---|
-| D-1 | Aderyn `L-3 Unchecked Return` vs `L-4 Unsafe ERC20 Operation` — identical 8 lines | Intra-tool duplicate |
-| D-2 | `slither/before/reentrancy-real.md` vs `full.md` ID-12/ID-13 | Duplicate report file |
-| D-3 | `slither/before/reentrancy-events.md` vs `full.md` ID-21..ID-27 | Duplicate report file |
-| D-4 | Slither ID-15 lists `admin = newAdmin` twice | Cosmetic duplicate |
-| D-5 | Aderyn H-2 vs Slither `reentrancy-no-eth` + `reentrancy-benign` + `reentrancy-events` | Same 3 sites, 4 detector views |
-| D-6 | Aderyn H-3 vs Slither `assembly` ID-34 | Same line, High vs Informational |
-| FP-1 | Aderyn H-3 (Yul `return` in proxy fallback) | Likely false positive — required proxy construct |
-| FP-2 | Aderyn H-1 (locked Ether in proxy) | Likely false positive — proxy forwards value |
-| FP-3 | Slither `timestamp` ID-29/30/31/32 | Likely false positives — non-timestamp comparisons |
-| FP-4 | Slither `incorrect-equality` ID-10/ID-11 | Likely false positives — early-return guards |
-| FP-5 | Slither `reentrancy-events` (all 7) | Not independent — evidence for B-2 |
+| D-1 | Aderyn `L-3 Unchecked Return` vs `L-4 Unsafe ERC20 Operation` — identical 9 lines | Intra-tool duplicate |
+| D-2 | `slither/after/reentrancy-real.md` vs `full.md` ID-14/15/16 | Duplicate report file |
+| D-3 | `slither/after/reentrancy-events.md` vs `full.md` ID-25..ID-32 | Duplicate report file |
+| D-4 | Slither ID-18 lists `admin = newAdmin` twice | Cosmetic duplicate |
+| D-5 | Aderyn `H-2` (13 raw hits) vs Slither `reentrancy-no-eth` + `reentrancy-benign` + `reentrancy-events` | Same ~4 sites, 4 detector views |
+| D-6 | Aderyn `H-3` vs Slither `assembly` ID-39 | Same line, High vs Info |
+| FP-1 | Aderyn `H-3` (Yul `return` in proxy fallback) | Likely FP — required proxy construct |
+| FP-2 | Aderyn `H-1` (locked Ether in proxy) | Likely FP — no ETH path in impl |
+| FP-3 | Slither `timestamp` ID-33/34/35/37 | Likely FP — non-timestamp comparisons |
+| FP-4 | Slither `incorrect-equality` ID-11/12/13 | Likely FP — early-return guards |
+| FP-5 | Aderyn `H-2` instance at `withdrawReserves` L408 | FP — "external call" is a `balanceOf` view |
+| FP-6 | Slither `reentrancy-events` (all 8) | Not independent — evidence for B-2 |
 
-**Severity disagreements to resolve manually:** unchecked ERC20 return (Slither **High** vs Aderyn **Low**) and proxy Yul `return` (Aderyn **High** vs Slither **Informational**). Neither tool is authoritative.
+**Severity disagreements to resolve manually:** unchecked ERC20 return (Slither **High** vs Aderyn **Low**); proxy Yul `return` (Aderyn **High** vs Slither **Info**). Neither tool is authoritative.
 
 ---
 
 ## 5. Not covered by either tool (manual-only surface)
 
-Absence of a finding is not evidence of correctness. No detector output addresses:
-- Storage-layout / slot-collision between `LendingMarket` and the hand-rolled proxy — **the intended check produced an empty file**.
-- Initializer protection: re-initialization, unprotected `initialize` front-running behind the proxy, implementation-contract initialization.
-- Interest-rate model and `accrueInterest` correctness (index math, first-accrual state, `suppliesBefore == 0`).
-- Liquidation economics: `seizeAmount` derivation, close factor, liquidation incentive, bad-debt / insolvency handling.
-- `collateralFactor` bounds and whether admin can set values that instantly make positions liquidatable.
-- Oracle decimals/scaling vs `FACTOR`, negative or stale `answer`.
-- Pause-guardian scope: which functions `paused` actually gates (can users exit while paused?).
-- Accounting invariants (`totalCollateral` vs actual balance; principal vs index-scaled balances).
+Absence of a finding ≠ correctness. No detector output addresses:
+- **Storage-layout / slot-collision** between `LendingMarket` and the hand-rolled proxy — the intended check produced an empty file. `reserveFactor`/`totalReserves` were appended to storage; confirm layout vs the live proxy.
+- **Initializer protection:** `initialize` is `external`, no `onlyAdmin`, only `_initialized` guard — re-init, front-running behind proxy, implementation-contract init.
+- **Interest-rate / accrual math:** `accrueInterest` index updates, `borrowRatePerSecond * elapsed` with no cap, first-accrual state, `suppliesBefore == 0` branch, linear (non-compounding) `baseBorrowIndex += index*interest/FACTOR`.
+- **Reserve accounting:** `reserveAccrued` split, `totalReserves` vs actual balance, `withdrawReserves` interaction with liquidity.
+- **Liquidation economics:** `seizeAmount = transferedAmount * liquidationIncentive / getPrice()` — unit consistency (base vs collateral, oracle scale vs `FACTOR`), no close-factor cap, bad-debt / insolvency handling, self-liquidation.
+- **`collateralFactor` / `liquidationIncentive` bounds:** `setParameters` allows `collateralFactor_ <= FACTOR` and `liquidationIncentive_ >= FACTOR` with no upper bound — admin can make positions instantly liquidatable.
+- **Oracle decimals/scaling** vs `FACTOR`; negative/stale `answer` (see S-2).
+- **Pause scope:** `repay` has no `whenNotPaused` (likely intentional); confirm users can exit while paused, and that `liquidate`/`borrow` gating is intended.
+- **Accounting invariants:** `totalCollateral` vs `collateralToken.balanceOf(this)`; principal vs index-scaled balances after fee-on-transfer deltas.
 
 ---
 
-## 6. Priority list for manual validation
+## 6. Priority list — validate manually first
 
-1. **B-1 — unchecked ERC20 returns (8 sites)** + token behaviour assumptions (fee-on-transfer / no-return / rebasing). Both tools agree; widest blast radius.
-2. **S-2 — `getPrice()` discards `updatedAt`/`roundId`/`answeredInRound`.** Feeds `isHealthy` → liquidation. Slither-only, Aderyn blind spot.
-3. **B-2 — CEI violations in `supply`, `supplyCollateral`, `repay`** with Slither's cross-function reachability into `borrow`/`liquidate`/`utilization`. Gate on the token-callback question from #1.
-4. **Empty `upgradeability.md` — re-run `slither-check-upgradeability`**, then review proxy storage layout, `initialize` protection, and constructor `delegatecall` to unvalidated `implementation_` (ID-18/ID-37) as one workstream.
-5. **S-1 — rounding direction in `accrueInterest` (L145-146) and `isHealthy` (L316-317).** Liquidation-boundary and interest-distribution math.
-6. **B-3/B-4 — privilege model:** `initialize` one-shot/access control, single-step `setAdmin`, pause-guardian scope. (The zero-checks and missing events themselves are hygiene.)
-7. **Confirm-and-dismiss:** Aderyn H-1, Aderyn H-3, Slither `timestamp` ID-29..32, `incorrect-equality` ID-10/11. Record as false positives with a one-line justification each.
+1. **B-1 — unchecked ERC20 returns (9 sites) + token-behaviour assumptions** (fee-on-transfer / no-return / rebasing). Both tools agree; widest blast radius; delta-check is applied inconsistently.
+2. **S-2 — `getPrice()` discards `updatedAt`/`roundId`/`answeredInRound` and never checks `answer > 0`.** Feeds `isHealthy` + `liquidate`. Slither-only; Aderyn blind.
+3. **Empty `upgradeability.md` — re-run `slither-check-upgradeability`**, then review proxy storage layout, unprotected `initialize` (B-3), and constructor `delegatecall` to unvalidated `implementation_` (ID-20/ID-42) as one workstream.
+4. **B-2 — CEI violations in `supply`, `supplyCollateral`, `repay`, `liquidate`** with Slither's cross-function reachability into `borrow`/`liquidate`/`utilization`/`isHealthy`. Gate on the token-callback question from #1; check for absence of a reentrancy guard.
+5. **S-1 — rounding direction in `accrueInterest` (L150-156) and `isHealthy` (L348-349).** Interest-distribution and liquidation-boundary math.
+6. **B-3 / B-4 — privilege model:** unprotected/one-shot `initialize`, single-step `setAdmin`, unbounded `setParameters`, pause-guardian scope. (Zero-checks and missing events themselves are hygiene.)
+7. **Confirm-and-dismiss (record one-line justification each):** Aderyn `H-1`, Aderyn `H-3`, Slither `timestamp` ID-33/34/35/37, `incorrect-equality` ID-11/12/13, Aderyn `H-2` @ `withdrawReserves` L408.

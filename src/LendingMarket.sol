@@ -157,13 +157,17 @@ contract LendingMarket {
         require(amount > 0, "zero amount");
         accrueInterest();
 
+        uint256 balanceBefore = baseToken.balanceOf(address(this));
         baseToken.transferFrom(msg.sender, address(this), amount);
+        uint256 transferedAmount = baseToken.balanceOf(address(this)) - balanceBefore;
 
-        uint256 principal = _principalForSupply(amount);
+        require(transferedAmount > 0, "zero amount");
+
+        uint256 principal = _principalForSupply(transferedAmount);
         supplyPrincipal[msg.sender] += principal;
         totalSupplyPrincipal += principal;
 
-        emit Supply(msg.sender, amount);
+        emit Supply(msg.sender, transferedAmount);
     }
 
     function withdraw(uint256 amount) external whenNotPaused {
@@ -188,12 +192,16 @@ contract LendingMarket {
     function supplyCollateral(uint256 amount) external whenNotPaused {
         require(amount > 0, "zero amount");
 
+        uint256 balanceBefore = collateralToken.balanceOf(address(this));
         collateralToken.transferFrom(msg.sender, address(this), amount);
+        uint256 transferedAmount = collateralToken.balanceOf(address(this)) - balanceBefore;
 
-        collateralBalance[msg.sender] += amount;
-        totalCollateral += amount;
+        require(transferedAmount > 0, "zero amount");
 
-        emit SupplyCollateral(msg.sender, amount);
+        collateralBalance[msg.sender] += transferedAmount;
+        totalCollateral += transferedAmount;
+
+        emit SupplyCollateral(msg.sender, transferedAmount);
     }
 
     function withdrawCollateral(uint256 amount) external whenNotPaused {
@@ -232,14 +240,18 @@ contract LendingMarket {
         uint256 owed = borrowBalanceOf(msg.sender);
         if (amount > owed) amount = owed;
 
-        uint256 principal = _principalForBorrow(amount);
-
+        uint256 balanceBefore = baseToken.balanceOf(address(this));
         baseToken.transferFrom(msg.sender, address(this), amount);
+        uint256 transferedAmount = baseToken.balanceOf(address(this)) - balanceBefore;
+
+        require(transferedAmount > 0, "zero amount");
+
+        uint256 principal = _principalForBorrow(transferedAmount);
 
         borrowPrincipal[msg.sender] -= principal;
         totalBorrowPrincipal -= principal;
 
-        emit Repay(msg.sender, amount);
+        emit Repay(msg.sender, transferedAmount);
     }
 
     // -------------------------------------------------------------------------------------------
@@ -261,22 +273,27 @@ contract LendingMarket {
         uint256 owed = borrowBalanceOf(borrower);
         if (repayAmount > owed) repayAmount = owed;
 
-        uint256 seizeAmount = (repayAmount * liquidationIncentive) / FACTOR;
+        uint256 balanceBefore = baseToken.balanceOf(address(this));
+        baseToken.transferFrom(msg.sender, address(this), repayAmount);
+        uint256 transferedAmount = baseToken.balanceOf(address(this)) - balanceBefore;
+
+        require(transferedAmount > 0, "zero amount");
+
+        uint256 seizeAmount = (transferedAmount * liquidationIncentive) / FACTOR;
         if (seizeAmount > collateralBalance[borrower]) {
             seizeAmount = collateralBalance[borrower];
         }
 
-        uint256 principal = _principalForBorrow(repayAmount);
+        uint256 principal = _principalForBorrow(transferedAmount);
         borrowPrincipal[borrower] -= principal;
         totalBorrowPrincipal -= principal;
 
         collateralBalance[borrower] -= seizeAmount;
         totalCollateral -= seizeAmount;
 
-        baseToken.transferFrom(msg.sender, address(this), repayAmount);
         collateralToken.transfer(msg.sender, seizeAmount);
 
-        emit Liquidate(msg.sender, borrower, repayAmount, seizeAmount);
+        emit Liquidate(msg.sender, borrower, transferedAmount, seizeAmount);
     }
 
     // -------------------------------------------------------------------------------------------

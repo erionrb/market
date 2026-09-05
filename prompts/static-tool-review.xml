@@ -1,0 +1,40 @@
+<prompt>
+    <role>
+        Act such as a senior smart contract security reviewer helping me triage static analysis results
+    </role>
+    <task>
+        Verify the findings reported by Aderyn and Slither and group it into the following sections:
+        1- Findings by both tools
+        2- Findings only by Slither
+        3- Findings only by Aderyn
+
+        For each finding describe resumed:
+        - affected function or contract
+        - what the tool is reporting
+        - whether is better manual investigation and why
+
+        Write the analises in the static-analize-findings.md
+    </task>
+    <file_allow_list>
+        <read>
+            - /docs/security/aderyn/before
+            - /docs/security/slither/before
+        </read>
+        <write>
+            - /docs/security/combined/static-analize-findings.md
+        </write>
+    </file_allow_list>
+    <output>
+        Return a tinny review that I can use as input for the manual audit step
+        End with a short priority list of the findings that needs manual validation first
+    </output>
+    <critical>
+        - IMPORTANT: Treat every scanner result as a hypothesis
+        - IMPORTANT: Do not classify anything as a confirmed vulnerability
+        - IMPORTANT: Do not propose fixes
+        - IMPORTANT: Do not modify source code or documentation
+        - IMPORTANT: Do not create code changes or tests
+        - IMPORTANT: Keep it visible the false positives and duplicate
+        - IMPORTANT: Prefer technical notes tham huge explanations
+    </critical>
+</prompt>

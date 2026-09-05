@@ -1,0 +1,80 @@
+<prompt>
+  <role>
+    Act as a senior protocol engineer helping me organize this practical exercise.
+    Iam responsible to validate every technical decision.
+  </role>
+  <task>
+    1- Read the practical exercise brief and inspect the repository.
+    2- Create a file: docs/execution-plan.md
+
+    This file will be the step by step execution plan I will follow for this exercise.
+
+    - Keep it concise, actionable and ordered.
+    - Use the following workflow: Discovery => Validation => Implementation => Verification => Review and QA
+    - Do not implement or modify source code yet
+  </task>
+
+  <time_context>
+    Started: 2026-09-05 10:00
+    Planned lunch break: 12:00
+    Target effort: approximately 4 to 5 focused hours
+    Aproximatelly Deadline: 2026-09-06 15:00
+
+    Do not assign fixed durations to individual phases.
+    The phases must remain adaptive.
+    Actual focused time will be recorded when completed.
+  </time_context>
+
+  <execution_plan>
+    Organize it as checklists:
+
+    Discovery
+       - inspect deployment topology, proxy, market, storage and tests
+       - run build and tests
+       - run Slither and Aderyn
+       - manually inspect financially sensitive paths
+       - record security hypotheses
+
+    Validation
+      - prioritize hypotheses by potential financial/protocol impact
+      - reproduce suspected defects with Foundry
+      - reject hypotheses that cannot be demonstrated
+      - classify confirmed findings by severity
+
+    Implementation
+      - fix confirmed findings with minimal changes
+      - implement the required reserve factor
+      - preserve external interfaces
+      - preserve storage/upgrade compatibility
+      - avoid unrelated refactoring
+      - run relevant tests after each change
+
+    Verification
+    - confirm regression tests fail against vulnerable behavior and pass after fixes
+    - add fuzz, invariant test
+    - verify storage/upgrade safety
+    - run the full Foundry suite
+    - rerun relevant static analysis
+
+    Review and QA
+      - review the complete diff
+      - check every requirement from the exercise
+      - finalize findings and severity
+      - document reserve accounting decisions
+      - document trade-offs, uncertainties and intentionally omitted work
+      - finalize README
+      - confirm repository is ready
+  </execution_plan>
+
+  <output>
+    - ecution-plan.md must be a working checklist
+    - keep it short
+    - each step should tell me what to do next and have a checkbox
+  </output>
+  <critial>
+    IMPORTANT: Do not implement or modify source code yet
+    IMPORTANT: Do not populate findings before discovery
+    IMPORTANT: Do not create other planning artifacts
+    IMPORTANT: Do not implement code
+  </critial>
+</prompt>

@@ -29,6 +29,9 @@ script/
   Deploy.s.sol                      staging deployment, mirrors the production topology
 test/
   LendingMarket.t.sol               the suite the market ships with today
+  ReserveFactor.t.sol               reserve-factor unit tests + solvency invariant
+docs/
+  discovery/reserve-factor.md       implementation discovery doc for the reserve factor
 ```
 
 ## How it works
@@ -47,6 +50,15 @@ this and is checked on any path that increases risk.
 **Liquidation.** Once a position is unhealthy, anyone may repay part of its debt and receive
 collateral in exchange, plus the liquidation incentive.
 
+**Reserves.** `accrueInterest()` splits the interest borrowers pay: a `reserveFactor` fraction
+(1e18-scaled) is retained by the protocol as `totalReserves`, the rest goes to suppliers through
+`baseSupplyIndex` as before. Borrowers are unaffected — `baseBorrowIndex` is untouched. Reserves
+are a flat accumulator in base-token units (not an index, they earn nothing). `reserveFactor`
+defaults to `0`, which reproduces the original accounting exactly. The admin sets the factor with
+`setReserveFactor()` and pulls accrued reserves with `withdrawReserves()`; both accrue first and
+are callable while the market is paused. `reserves()` returns the stored total (stale between
+accruals by design).
+
 **Deployment.** Each market is an implementation behind its own `TransparentUpgradeableProxy`. All
 market state lives in the proxy's storage. The admin address owns upgrades and risk parameters. A
 separate pause guardian exists so the market can be stopped quickly without reaching for the admin
@@ -56,10 +68,117 @@ key.
 
 | Role | Held by | Remit |
 |---|---|---|
-| `admin` | governance timelock | upgrades, risk parameters, wiring |
+| `admin` | governance timelock | upgrades, risk parameters, wiring, reserve factor, reserve withdrawals |
 | `pauseGuardian` | operations multisig | stopping the market in an incident |
 
 ## Listed markets
 
 See `script/Deploy.s.sol` for the current staging configuration and the collateral assets listed
 against the base asset.
+
+## Dev notes
+
+Verification procedure ran before and after the storage changes:
+```bash
+forge inspect src/LendingMarket.sol:LendingMarket storage-layout
+```
+
+### Reserve-factor change
+
+`reserveFactor` (slot 18) and `totalReserves` (slot 19) were appended after `_initialized`.
+
+**Layout before the reserve-factor change**
+
+```
+╭----------------------+-----------------------------+------+--------+-------+-------------------------------------╮
+| Name                 | Type                        | Slot | Offset | Bytes | Contract                            |
++==================================================================================================================+
+| admin                | address                     | 0    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| pauseGuardian        | address                     | 1    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| oracle               | contract IPriceOracle       | 2    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseToken            | contract IERC20             | 3    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralToken      | contract IERC20             | 4    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseBorrowIndex      | uint256                     | 5    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseSupplyIndex      | uint256                     | 6    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| lastAccrualTime      | uint256                     | 7    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalSupplyPrincipal | uint256                     | 8    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalBorrowPrincipal | uint256                     | 9    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalCollateral      | uint256                     | 10   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralFactor     | uint256                     | 11   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| liquidationIncentive | uint256                     | 12   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| borrowRatePerSecond  | uint256                     | 13   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| supplyPrincipal      | mapping(address => uint256) | 14   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| borrowPrincipal      | mapping(address => uint256) | 15   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralBalance    | mapping(address => uint256) | 16   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| paused               | bool                        | 17   | 0      | 1     | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| _initialized         | bool                        | 17   | 1      | 1     | src/LendingMarket.sol:LendingMarket |
+╰----------------------+-----------------------------+------+--------+-------+-------------------------------------╯
+```
+
+**Layout after the reserve-factor change**
+
+```
+╭----------------------+-----------------------------+------+--------+-------+-------------------------------------╮
+| Name                 | Type                        | Slot | Offset | Bytes | Contract                            |
++==================================================================================================================+
+| admin                | address                     | 0    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| pauseGuardian        | address                     | 1    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| oracle               | contract IPriceOracle       | 2    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseToken            | contract IERC20             | 3    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralToken      | contract IERC20             | 4    | 0      | 20    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseBorrowIndex      | uint256                     | 5    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| baseSupplyIndex      | uint256                     | 6    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| lastAccrualTime      | uint256                     | 7    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalSupplyPrincipal | uint256                     | 8    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalBorrowPrincipal | uint256                     | 9    | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalCollateral      | uint256                     | 10   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralFactor     | uint256                     | 11   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| liquidationIncentive | uint256                     | 12   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| borrowRatePerSecond  | uint256                     | 13   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| supplyPrincipal      | mapping(address => uint256) | 14   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| borrowPrincipal      | mapping(address => uint256) | 15   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| collateralBalance    | mapping(address => uint256) | 16   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| paused               | bool                        | 17   | 0      | 1     | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| _initialized         | bool                        | 17   | 1      | 1     | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| reserveFactor        | uint256                     | 18   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+|----------------------+-----------------------------+------+--------+-------+-------------------------------------|
+| totalReserves        | uint256                     | 19   | 0      | 32    | src/LendingMarket.sol:LendingMarket |
+╰----------------------+-----------------------------+------+--------+-------+-------------------------------------╯
+```

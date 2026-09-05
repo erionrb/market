@@ -1,0 +1,58 @@
+<prompt>
+    <role>
+        Act such as a senior Solidity engineer helping me design the reserve factor feature
+    </role>
+
+    <task>
+        Read the current LendingMarket implementation and prepare a discovery document
+        describing how we can add a reserve factor.
+
+        The idea should be simple: borrowers keep paying the same interest, 
+        but a configurable percentage of that interest should go to protocol reserves instead of suppliers.
+
+        I want to follow a Compound V2 like approach where reserves are accumulated
+        separately rather than introducing another interest index.
+    </task>
+
+    <requirements>
+        We need to support:
+        - reserveFactor()
+        - reserves()
+        - setReserveFactor(uint256)
+        - withdrawReserves(address,uint256)
+        reserveFactor should use 1e18 scaling, be capped at 100%, default to zero, and only be changed by the existing admin role.
+        Existing deployed markets must behave the same while reserveFactor is zero.
+        This contract is behind an upgradeable proxy with existing balances, so storage compatibility is extremelly important.
+    </requirements>
+
+    <read>
+        - src/LendingMarket.sol
+        - src/TransparentUpgradeableProxy.sol
+        - test/LendingMarket.t.sol
+        - script/Deploy.s.sol
+        - README.md
+    </read>
+
+    <write>
+        - docs/discovery/reserve-factor.md
+    </write>
+
+    <output>
+        Document:
+        - how interest accounting works today
+        - where reserve accounting should be introduced
+        - required storage changes
+        - new functions and events
+        - upgrade/storage considerations
+        - tests we should add
+        - risks or open questions
+        - a small implementation plan
+    </output>
+
+    <critical>
+        IMPORTANT: Do not modify Solidity or tests.
+        IMPORTANT: Do not implement the feature yet.
+        IMPORTANT: If something in this design does not fit the current accounting,
+        IMPORTANT: document it instead of making assumptions.
+    </critical>
+</prompt>

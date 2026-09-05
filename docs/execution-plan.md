@@ -23,7 +23,10 @@ Focused time is recorded per phase as the work progresses.
     - Found fewer issues than Slither, including 3 High findings.
     - Results differ from Slither and need manual validation.
 - [x] Cross check Slither and Aderyn findings with manual and AI Review
-- [ ] Manually trace financially sensitive paths: supply, borrow, repay, withdraw, liquidate, accrueInterest(), index math, health check
+- [x] Manually trace financially sensitive paths: supply, borrow, repay, withdraw, liquidate, accrueInterest(), index math, health check
+    - Prioritized paths with direct user/protocol financial impact
+    - Confirmed transfer accounting and liquidation pricing defects
+    - Remaining lower-confidence hypotheses deferred to final review if time permits
 - [x] Record security hypotheses (one line each: path,  suspectedissue, why) — no severity/classification yet
 - [x] Note what "reserve factor" requirement implies given current accounting (no reserve logic found yet in README) — capture as open question, not a decision
 
@@ -38,11 +41,18 @@ Focused time is recorded per phase as the work progresses.
 - Reentrancy: some external calls happen before state updates, need to check if there is an actual exploitable path
 - Proxy: still need to check storage layout and initializer
 
+### Validation status
+
+- `supplyCollateral / supply / repay / liquidate transfers`: Confirmed, was using the requested amount instead of the amount received by the market, fixed and tested.
+- `liquidate`: Confirmed, was not using the collateral price to convert the repaid base amount into collateral units, fixed and tested.
+- `Reentrancy`: the currently listed assets do not expose this behavior as per does not have callback function.
+- Other potential issues left for later if still have time.
+
 ---
 
 ## 2. Validation
 
-- [ ] Rank hypotheses from Discovery by potential financial/protocol impact
+- [x] Rank hypotheses from Discovery by potential financial/protocol impact
 - [ ] For each hypothesis (highest impact first): write a Foundry test/PoC that attempts to reproduce it
 - [ ] Mark each hypothesis Confirmed (reproduced) or Rejected (could not demonstrate) — keep rejected ones with a one-line reason, don't delete
 - [ ] Classify each confirmed finding by severity (Critical / High / Medium / Low / Info)
@@ -54,12 +64,12 @@ Focused time is recorded per phase as the work progresses.
 
 ## 3. Implementation
 
-- [ ] Fix confirmed findings, one at a time, minimal diff per fix
-- [ ] Implement the reserve factor accounting
-- [ ] Preserve all external interfaces (function signatures, events, roles)
-- [ ] Preserve storage layout / upgrade compatibility (append-only, no reordering/resizing existing slots)
-- [ ] No unrelated refactoring — resist drive-by cleanup
-- [ ] Run the relevant test subset after each individual change (`forge test --match-test` / `--match-contract`)
+- [x] Fix confirmed findings, one at a time, minimal diff per fix
+- [x] Implement the reserve factor accounting
+- [x] Preserve all external interfaces (function signatures, events, roles)
+- [x] Preserve storage layout / upgrade compatibility (append-only, no reordering/resizing existing slots)
+- [x] No unrelated refactoring — resist drive-by cleanup
+- [x] Run the relevant test subset after each individual change (`forge test --match-test` / `--match-contract`)
 
 **Exit criteria:** all confirmed findings addressed, reserve factor implemented, each change independently test-verified.
 

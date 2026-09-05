@@ -59,6 +59,10 @@ contract LendingMarket {
 
     bool private _initialized;
 
+    // --- reserves (appended; zero-initialised on the live proxy) ---
+    uint256 public reserveFactor;
+    uint256 internal totalReserves;
+
     // -------------------------------------------------------------------------------------------
     // Events
     // -------------------------------------------------------------------------------------------
@@ -73,6 +77,8 @@ contract LendingMarket {
     event OracleUpdated(address indexed newOracle);
     event ParametersUpdated(uint256 collateralFactor, uint256 liquidationIncentive, uint256 borrowRate);
     event PausedSet(bool paused);
+    event ReserveFactorSet(uint256 reserveFactor);
+    event ReservesWithdrawn(address indexed recipient, uint256 amount);
 
     // -------------------------------------------------------------------------------------------
     // Modifiers
@@ -141,9 +147,13 @@ contract LendingMarket {
 
         baseBorrowIndex += (baseBorrowIndex * interest) / FACTOR;
 
+        uint256 borrowerInterest = (borrowsBefore * interest) / FACTOR;
+        uint256 reserveAccrued = (borrowerInterest * reserveFactor) / FACTOR;
+        if (reserveAccrued != 0) totalReserves += reserveAccrued;
+
         if (suppliesBefore > 0) {
-            uint256 accruedToSuppliers = (borrowsBefore * interest) / FACTOR;
-            baseSupplyIndex += (baseSupplyIndex * accruedToSuppliers) / suppliesBefore;
+            uint256 supplierInterest = borrowerInterest - reserveAccrued;
+            baseSupplyIndex += (baseSupplyIndex * supplierInterest) / suppliesBefore;
         }
 
         lastAccrualTime = block.timestamp;
@@ -308,6 +318,11 @@ contract LendingMarket {
         return presentValueSupply(supplyPrincipal[account]);
     }
 
+    /// @notice Stored protocol reserves in base-token units. Stale between accruals by design.
+    function reserves() external view returns (uint256) {
+        return totalReserves;
+    }
+
     function presentValueBorrow(uint256 principal) public view returns (uint256) {
         return (principal * baseBorrowIndex) / FACTOR;
     }
@@ -378,6 +393,22 @@ contract LendingMarket {
         borrowRatePerSecond = borrowRatePerSecond_;
 
         emit ParametersUpdated(collateralFactor_, liquidationIncentive_, borrowRatePerSecond_);
+    }
+
+    function setReserveFactor(uint256 newReserveFactor) external onlyAdmin {
+        accrueInterest();
+        require(newReserveFactor <= FACTOR, "reserve factor too high");
+        reserveFactor = newReserveFactor;
+        emit ReserveFactorSet(newReserveFactor);
+    }
+
+    function withdrawReserves(address recipient, uint256 amount) external onlyAdmin {
+        accrueInterest();
+        require(amount <= totalReserves, "amount exceeds reserves");
+        require(amount <= baseToken.balanceOf(address(this)), "insufficient liquidity");
+        totalReserves -= amount;
+        baseToken.transfer(recipient, amount);
+        emit ReservesWithdrawn(recipient, amount);
     }
 
     function setPaused(bool paused_) external onlyGuardian {

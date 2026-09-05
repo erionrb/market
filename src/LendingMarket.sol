@@ -279,7 +279,7 @@ contract LendingMarket {
 
         require(transferedAmount > 0, "zero amount");
 
-        uint256 seizeAmount = (transferedAmount * liquidationIncentive) / FACTOR;
+        uint256 seizeAmount = (transferedAmount * liquidationIncentive) / getPrice();
         if (seizeAmount > collateralBalance[borrower]) {
             seizeAmount = collateralBalance[borrower];
         }
